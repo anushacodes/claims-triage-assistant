@@ -168,5 +168,4 @@ training/artifacts/
 # Local notebooks data
 notebooks/data/
 
-# Local plan file (do not push to public repo)
 PLAN.md
