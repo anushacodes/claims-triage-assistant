@@ -9,6 +9,20 @@ import joblib
 
 from training.features import build_features
 
+def triage_decision(prob: float) -> str:
+    """
+    Determines the decision category based on the predicted fraud probability.
+    - >= 0.90: Auto-reject (high risk of fraud)
+    - >= 0.55: Manual review (moderate risk / uncertain)
+    - < 0.55: Auto-approve (low risk of fraud)
+    """
+    if prob >= 0.90:
+        return "AUTO_REJECT"
+    elif prob >= 0.55:
+        return "MANUAL_REVIEW"
+    else:
+        return "AUTO_APPROVE"
+
 def main():
     dataset_path = 'notebooks/data/insurance_claims.csv'
     model_path = 'training/artifacts/model.joblib'
@@ -77,6 +91,28 @@ def main():
             "counts": [int(x) for x in counts],
             "bin_edges": [float(x) for x in bin_edges]
         }
+    }
+    
+    # Calculate triage decisions coverage
+    decisions = [triage_decision(p) for p in y_pred_prob]
+    decisions_series = pd.Series(decisions)
+    coverage = decisions_series.value_counts(normalize=True).to_dict()
+    counts_dict = decisions_series.value_counts().to_dict()
+    
+    # Fill in missing options just in case
+    for choice in ["AUTO_APPROVE", "MANUAL_REVIEW", "AUTO_REJECT"]:
+        if choice not in coverage:
+            coverage[choice] = 0.0
+        if choice not in counts_dict:
+            counts_dict[choice] = 0
+            
+    print("\nTriage Decision Coverage on Test Set:")
+    for choice in ["AUTO_APPROVE", "MANUAL_REVIEW", "AUTO_REJECT"]:
+        print(f"  {choice}: {counts_dict[choice]} ({coverage[choice]*100:.2f}%)")
+        
+    results["triage_coverage"] = {
+        "percentages": {k: float(v) for k, v in coverage.items()},
+        "counts": {k: int(v) for k, v in counts_dict.items()}
     }
     
     print(f"Saving evaluation results to {eval_results_path}...")
