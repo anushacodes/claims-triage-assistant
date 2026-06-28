@@ -1,125 +1,135 @@
-import os
 import json
+import os
+
+import joblib
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
 from sklearn.calibration import calibration_curve
-import joblib
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.model_selection import train_test_split
 
 from training.features import build_features
 
+DATASET_PATH     = 'notebooks/data/insurance_claims.csv'
+MODEL_PATH       = 'training/artifacts/model.joblib'
+EVAL_RESULTS_PATH = 'training/artifacts/eval_results.json'
+
+# Thresholds are calibrated to the isotonic-calibrated model's output range (~0.0–0.70).
+# Derived from the training-set probability percentile distribution:
+#   >= 0.60 → top ~5% of scores — high-confidence fraud
+#   >= 0.35 → above-median probability — uncertain, needs review
+#   <  0.35 → low fraud probability — safe to auto-approve
+AUTO_REJECT_THRESHOLD    = 0.60
+MANUAL_REVIEW_THRESHOLD  = 0.35
+
+
 def triage_decision(prob: float) -> str:
     """
-    Determines the decision category based on the predicted fraud probability.
-    - >= 0.90: Auto-reject (high risk of fraud)
-    - >= 0.55: Manual review (moderate risk / uncertain)
-    - < 0.55: Auto-approve (low risk of fraud)
+    Routes a claim based on its fraud probability.
+
+    Thresholds are tuned to the isotonic-calibrated model output range (~0.0–0.70):
+    - >= 0.60 : AUTO_REJECT   — top ~5% of scores, high-confidence fraud
+    - >= 0.35 : MANUAL_REVIEW — above-median probability, needs human judgment
+    - <  0.35 : AUTO_APPROVE  — low fraud risk, safe to process automatically
     """
-    if prob >= 0.90:
+    if prob >= AUTO_REJECT_THRESHOLD:
         return "AUTO_REJECT"
-    elif prob >= 0.55:
+    if prob >= MANUAL_REVIEW_THRESHOLD:
         return "MANUAL_REVIEW"
-    else:
-        return "AUTO_APPROVE"
+    return "AUTO_APPROVE"
+
 
 def main():
-    dataset_path = 'notebooks/data/insurance_claims.csv'
-    model_path = 'training/artifacts/model.joblib'
-    eval_results_path = 'training/artifacts/eval_results.json'
-    
     print("Loading test data...")
-    if not os.path.exists(dataset_path):
-        raise FileNotFoundError(f"Dataset not found at {dataset_path}")
-        
-    df = pd.read_csv(dataset_path)
+    if not os.path.exists(DATASET_PATH):
+        raise FileNotFoundError(f"Dataset not found at {DATASET_PATH}")
+
+    df = pd.read_csv(DATASET_PATH)
     df_processed = build_features(df)
-    
+
     X = df_processed.drop(columns=['fraud_reported'])
     y = df_processed['fraud_reported']
-    
-    # Split using the exact same random state and stratify
+
+    # Same split as train.py — reproduces identical holdout set
     _, X_test, _, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
-    
-    print(f"Loading model from {model_path}...")
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"Model artifact not found at {model_path}. Please run train.py first.")
-        
-    model = joblib.load(model_path)
-    
-    # Get predictions
-    y_pred = model.predict(X_test)
+
+    print(f"Loading model from {MODEL_PATH}...")
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError(f"Model not found. Run train.py first.")
+
+    model = joblib.load(MODEL_PATH)
+
+    y_pred      = model.predict(X_test)
     y_pred_prob = model.predict_proba(X_test)[:, 1]
-    
-    # Calculate classification metrics
+
+    # Core metrics
     report = classification_report(y_test, y_pred, output_dict=True)
-    auc = roc_auc_score(y_test, y_pred_prob)
+    auc    = roc_auc_score(y_test, y_pred_prob)
     tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
-    
+
     print("\nClassification Report:")
     print(classification_report(y_test, y_pred))
     print(f"ROC-AUC: {auc:.4f}")
-    
-    # Calibration Curve (Reliability Diagram)
+
+    # Calibration curve
     prob_true, prob_pred = calibration_curve(y_test, y_pred_prob, n_bins=10, strategy='uniform')
-    
-    # Confidence Histogram
-    counts, bin_edges = np.histogram(y_pred_prob, bins=10, range=(0, 1))
-    
-    # Prepare results for JSON export
+
+    # Confidence histogram
+    hist_counts, bin_edges = np.histogram(y_pred_prob, bins=10, range=(0, 1))
+
+    # Triage band coverage + per-band precision
+    decisions = pd.Series([triage_decision(p) for p in y_pred_prob])
+    y_test_reset = y_test.reset_index(drop=True)
+
+    band_stats: dict = {}
+    for band in ["AUTO_APPROVE", "MANUAL_REVIEW", "AUTO_REJECT"]:
+        mask = decisions == band
+        n = int(mask.sum())
+        if n > 0:
+            fraud_rate = float(y_test_reset[mask].mean())
+        else:
+            fraud_rate = 0.0
+        band_stats[band] = {
+            "count":      n,
+            "pct":        round(n / len(decisions), 4),
+            "fraud_rate": round(fraud_rate, 4),
+        }
+
+    print("\nTriage Band Coverage:")
+    for band, s in band_stats.items():
+        print(f"  {band}: {s['count']} ({s['pct']*100:.1f}%)  fraud_rate={s['fraud_rate']:.2%}")
+
     results = {
+        "thresholds": {
+            "auto_reject":   AUTO_REJECT_THRESHOLD,
+            "manual_review": MANUAL_REVIEW_THRESHOLD,
+        },
         "metrics": {
-            "accuracy": float(report["accuracy"]),
+            "accuracy":  float(report["accuracy"]),
             "precision": float(report["1"]["precision"]),
-            "recall": float(report["1"]["recall"]),
-            "f1_score": float(report["1"]["f1-score"]),
-            "roc_auc": float(auc)
+            "recall":    float(report["1"]["recall"]),
+            "f1_score":  float(report["1"]["f1-score"]),
+            "roc_auc":   float(auc),
         },
-        "confusion_matrix": {
-            "tn": int(tn),
-            "fp": int(fp),
-            "fn": int(fn),
-            "tp": int(tp)
-        },
+        "confusion_matrix": {"tn": int(tn), "fp": int(fp), "fn": int(fn), "tp": int(tp)},
         "calibration": {
             "true_probabilities": [float(x) for x in prob_true],
-            "pred_probabilities": [float(x) for x in prob_pred]
+            "pred_probabilities": [float(x) for x in prob_pred],
         },
         "confidence_histogram": {
-            "counts": [int(x) for x in counts],
-            "bin_edges": [float(x) for x in bin_edges]
-        }
+            "counts":    [int(x) for x in hist_counts],
+            "bin_edges": [float(x) for x in bin_edges],
+        },
+        "triage_coverage": band_stats,
     }
-    
-    # Calculate triage decisions coverage
-    decisions = [triage_decision(p) for p in y_pred_prob]
-    decisions_series = pd.Series(decisions)
-    coverage = decisions_series.value_counts(normalize=True).to_dict()
-    counts_dict = decisions_series.value_counts().to_dict()
-    
-    # Fill in missing options just in case
-    for choice in ["AUTO_APPROVE", "MANUAL_REVIEW", "AUTO_REJECT"]:
-        if choice not in coverage:
-            coverage[choice] = 0.0
-        if choice not in counts_dict:
-            counts_dict[choice] = 0
-            
-    print("\nTriage Decision Coverage on Test Set:")
-    for choice in ["AUTO_APPROVE", "MANUAL_REVIEW", "AUTO_REJECT"]:
-        print(f"  {choice}: {counts_dict[choice]} ({coverage[choice]*100:.2f}%)")
-        
-    results["triage_coverage"] = {
-        "percentages": {k: float(v) for k, v in coverage.items()},
-        "counts": {k: int(v) for k, v in counts_dict.items()}
-    }
-    
-    print(f"Saving evaluation results to {eval_results_path}...")
-    with open(eval_results_path, 'w') as f:
+
+    with open(EVAL_RESULTS_PATH, 'w') as f:
         json.dump(results, f, indent=4)
-        
-    print("Evaluation completed successfully.")
+    print(f"\nSaved evaluation results to {EVAL_RESULTS_PATH}")
+    print("Evaluation complete.")
+
 
 if __name__ == '__main__':
     main()
