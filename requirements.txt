@@ -11,3 +11,4 @@ streamlit
 plotly
 httpx
 python-dotenv
+nbformat>=4.2.0
