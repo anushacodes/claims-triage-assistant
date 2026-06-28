@@ -1,0 +1,13 @@
+pandas
+scikit-learn
+xgboost
+shap
+fastapi
+uvicorn
+sqlmodel
+boto3
+sagemaker
+streamlit
+plotly
+httpx
+python-dotenv
