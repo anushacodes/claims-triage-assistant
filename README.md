@@ -68,3 +68,5 @@ An enterprise-grade Machine Learning system designed for decision orchestration,
    cp .env.example .env
    # Edit .env with your credentials and configurations
    ```
+3. Prepare the dataset:
+   - Place the Kaggle `insurance_claims.csv` dataset in `notebooks/data/insurance_claims.csv`.
